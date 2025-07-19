@@ -1,29 +1,34 @@
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
-from fastapi.middleware.cors import CORSMiddleware
 import logging
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Load environment variables
+# Load env vars
 load_dotenv()
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Logger setup
+# Logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# App + rate limiter
-limiter = Limiter(key_func=get_remote_address)
+# FastAPI app init
 app = FastAPI()
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS config
+# PATCH: Add OPTIONS to all routes (CORS preflight fix)
+@app.on_event("startup")
+def ensure_options_allowed():
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            route.methods.update(["OPTIONS"])
+
+# CORS middleware
 origins = [
     "http://localhost:5173",
     "https://louaialsabbagh.tech"
@@ -37,12 +42,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiter setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Health check
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
 
-# Request schema
+# Schema
 class Question(BaseModel):
     message: str
 
@@ -63,7 +73,7 @@ He communicates efficiently and focuses on facts, logic, and clarity.
 Avoid filler language, exaggeration, jokes, or informal tone.
 """
 
-# Topic keyword mapping
+# Keyword mapping
 KEY_TOPICS = {
     "skills": ["skill", "tech", "technology", "stack", "tools", "programming", "languages", "framework"],
     "projects": ["project", "work", "experience", "build", "portfolio", "code", "app"],
@@ -83,12 +93,10 @@ def detect_topic(message: str) -> str:
 def is_simple_question(message: str) -> bool:
     simple_keywords = ["what", "who", "where", "when", "why", "how", "your name", "skill", "language", "hello"]
     msg = message.lower()
-    is_short = len(msg.split()) <= 10
-    contains_simple = any(kw in msg for kw in simple_keywords)
-    return is_short and contains_simple
+    return len(msg.split()) <= 10 and any(kw in msg for kw in simple_keywords)
 
 @app.post("/about-louai")
-@limiter.limit("5/minute")  # Rate limiting: 5 requests per minute per IP
+@limiter.limit("5/minute")
 async def about_me(request: Request, q: Question):
     if not q.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -100,7 +108,6 @@ async def about_me(request: Request, q: Question):
         "Keep it short and direct (1-2 sentences)." if simple else "Provide a professional and concise answer."
     )
 
-    # Prompt per topic
     if topic == "skills":
         prompt = f"""
 The question is about Louai's technical skills.
@@ -171,8 +178,7 @@ Provide a direct, informative, and professional answer as Louai.
             temperature=0.5,
             max_tokens=300
         )
-        content = response.choices[0].message.content.strip()
-        return {"response": content}
+        return {"response": response.choices[0].message.content.strip()}
 
     except Exception as e:
         logger.error(f"OpenAI API call failed: {e}")
